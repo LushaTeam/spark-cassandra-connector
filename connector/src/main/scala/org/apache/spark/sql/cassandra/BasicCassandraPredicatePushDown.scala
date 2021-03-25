@@ -2,35 +2,35 @@ package org.apache.spark.sql.cassandra
 
 import com.datastax.oss.driver.api.core.{DefaultProtocolVersion, ProtocolVersion}
 import com.datastax.spark.connector.cql.TableDef
-import com.datastax.spark.connector.types.TimeUUIDType
+//import com.datastax.spark.connector.types.TimeUUIDType
 
 /**
- *  Determines which filter predicates can be pushed down to Cassandra.
- *
- *  1. Only push down no-partition key column predicates with =, >, <, >=, <= predicate
- *  2. Only push down primary key column predicates with = or IN predicate.
- *  3. If there are regular columns in the pushdown predicates, they should have
- *     at least one EQ expression on an indexed column and no IN predicates.
- *  4. All partition column predicates must be included in the predicates to be pushed down,
- *     only the last part of the partition key can be an IN predicate. For each partition column,
- *     only one predicate is allowed.
- *  5. For cluster column predicates, only last predicate can be non-EQ predicate
- *     including IN predicate, and preceding column predicates must be EQ predicates.
- *     If there is only one cluster column predicate, the predicates could be any non-IN predicate.
- *  6. There is no pushdown predicates if there is any OR condition or NOT IN condition.
- *  7. We're not allowed to push down multiple predicates for the same column if any of them
- *     is equality or IN predicate.
- *
- *  The list of predicates to be pushed down is available in `predicatesToPushDown` property.
- *  The list of predicates that cannot be pushed down is available in `predicatesToPreserve` property.
- *
- * @param predicates list of filter predicates available in the user query
- * @param table Cassandra table definition
- */
+  *  Determines which filter predicates can be pushed down to Cassandra.
+  *
+  *  1. Only push down no-partition key column predicates with =, >, <, >=, <= predicate
+  *  2. Only push down primary key column predicates with = or IN predicate.
+  *  3. If there are regular columns in the pushdown predicates, they should have
+  *     at least one EQ expression on an indexed column and no IN predicates.
+  *  4. All partition column predicates must be included in the predicates to be pushed down,
+  *     only the last part of the partition key can be an IN predicate. For each partition column,
+  *     only one predicate is allowed.
+  *  5. For cluster column predicates, only last predicate can be non-EQ predicate
+  *     including IN predicate, and preceding column predicates must be EQ predicates.
+  *     If there is only one cluster column predicate, the predicates could be any non-IN predicate.
+  *  6. There is no pushdown predicates if there is any OR condition or NOT IN condition.
+  *  7. We're not allowed to push down multiple predicates for the same column if any of them
+  *     is equality or IN predicate.
+  *
+  *  The list of predicates to be pushed down is available in `predicatesToPushDown` property.
+  *  The list of predicates that cannot be pushed down is available in `predicatesToPreserve` property.
+  *
+  * @param predicates list of filter predicates available in the user query
+  * @param table Cassandra table definition
+  */
 class BasicCassandraPredicatePushDown[Predicate : PredicateOps](
-  predicates: Set[Predicate],
-  table: TableDef,
-  pv: ProtocolVersion = ProtocolVersion.DEFAULT) {
+                                                                 predicates: Set[Predicate],
+                                                                 table: TableDef,
+                                                                 pv: ProtocolVersion = ProtocolVersion.DEFAULT) {
 
   val pvOrdering = Ordering.fromLessThan[ProtocolVersion]((a,b) => a.getCode < b.getCode)
   import pvOrdering._
@@ -69,6 +69,20 @@ class BasicCassandraPredicatePushDown[Predicate : PredicateOps](
   private def firstNonEmptySet[T](sets: Set[T]*): Set[T] =
     sets.find(_.nonEmpty).getOrElse(Set.empty[T])
 
+
+  /** All non-equal predicates on a TimeUUID column are going to fail and fail
+    * in silent way. The basic issue here is that when you use a comparison on
+    * a time UUID column in C* it compares based on the Time portion of the UUID. When
+    * Spark executes this filter (unhandled behavior) it will compare lexically, this
+    * will lead to results being incorrectly filtered out of the set. As long as the
+    * range predicate is handled completely by the connector the correct result
+    * will be obtained.
+    */
+  //  val timeUUIDNonEqual = {
+  //    val timeUUIDCols = table.columns.filter(x => x.columnType == TimeUUIDType)
+  //    timeUUIDCols.flatMap(col => rangePredicatesByName.get(col.columnName)).flatten
+  //  }
+
   /** Evaluates set of columns used in equality predicates and set of columns use in 'in' predicates.
     * Evaluation is based on protocol version. */
   private def partitionKeyPredicateColumns(pv: ProtocolVersion): (Seq[String], Seq[String]) = {
@@ -77,17 +91,17 @@ class BasicCassandraPredicatePushDown[Predicate : PredicateOps](
       (eqColumns, otherColumns.headOption.toSeq.filter(inPredicatesByName.contains))
     } else {
       (partitionKeyColumns.intersect(eqPredicatesByName.keys.toSeq),
-          partitionKeyColumns.intersect(inPredicatesByName.keys.toSeq))
+        partitionKeyColumns.intersect(inPredicatesByName.keys.toSeq))
     }
   }
 
   /**
-   * Selects partition key predicates for pushdown:
-   * 1. Partition key predicates must be equality or IN predicates.
-   * 2. Up to V3 protocol version only the last partition key column predicate can be an IN.
-   *    For V4 protocol version and newer any partition key column predicate can be an IN.
-   * 3. All partition key predicates must be used or none.
-   */
+    * Selects partition key predicates for pushdown:
+    * 1. Partition key predicates must be equality or IN predicates.
+    * 2. Up to V3 protocol version only the last partition key column predicate can be an IN.
+    *    For V4 protocol version and newer any partition key column predicate can be an IN.
+    * 3. All partition key predicates must be used or none.
+    */
   private val partitionKeyPredicatesToPushDown: Set[Predicate] = {
     val (eqColumns, inColumns) = partitionKeyPredicateColumns(pv)
     if (eqColumns.size + inColumns.size == partitionKeyColumns.size)
@@ -142,12 +156,12 @@ class BasicCassandraPredicatePushDown[Predicate : PredicateOps](
   }
 
   /**
-   * Selects indexed and regular column predicates for pushdown:
-   * 1. At least one indexed column must be present in an equality predicate to be pushed down.
-   * 2. Regular column predicates can be either equality or range predicates.
-   * 3. If multiple predicates use the same column, equality predicates are preferred over range
-   *    predicates.
-   */
+    * Selects indexed and regular column predicates for pushdown:
+    * 1. At least one indexed column must be present in an equality predicate to be pushed down.
+    * 2. Regular column predicates can be either equality or range predicates.
+    * 3. If multiple predicates use the same column, equality predicates are preferred over range
+    *    predicates.
+    */
   private val indexedColumnPredicatesToPushDown: Set[Predicate] = {
     val inPredicateInPrimaryKey = partitionKeyPredicatesToPushDown.exists(Predicates.isInPredicate)
     val eqIndexedColumns = indexedColumns.filter(eqPredicatesByName.contains)
@@ -161,15 +175,15 @@ class BasicCassandraPredicatePushDown[Predicate : PredicateOps](
     // where clause and it can't have other partial partition columns in where clause any more.
     val nonIndexedPredicates = for {
       c <- allColumns if
-        partitionKeyPredicatesToPushDown.nonEmpty && !eqIndexedColumns.contains(c) ||
+      partitionKeyPredicatesToPushDown.nonEmpty && !eqIndexedColumns.contains(c) ||
         partitionKeyPredicatesToPushDown.isEmpty && !eqIndexedColumns.contains(c) && !partitionKeyColumns.contains(c)
       p <- firstNonEmptySet(eqPredicatesByName(c), rangePredicatesByName(c))
     } yield p
 
-    if (!inPredicateInPrimaryKey && eqIndexedColumns.nonEmpty)
-      (eqIndexedPredicates ++ nonIndexedPredicates).toSet
-    else
-      Set.empty
+    //    if (!inPredicateInPrimaryKey && eqIndexedColumns.nonEmpty)
+    (eqIndexedPredicates ++ nonIndexedPredicates).toSet
+    //    else
+    //      Set.empty
   }
 
   /** Returns the set of predicates that can be safely pushed down to Cassandra */
@@ -183,4 +197,20 @@ class BasicCassandraPredicatePushDown[Predicate : PredicateOps](
   val predicatesToPreserve: Set[Predicate] =
     predicates -- predicatesToPushDown
 
+
+  //  val unhandledTimeUUIDNonEqual = {
+  //    timeUUIDNonEqual.toSet -- predicatesToPushDown
+  //  }
+
+  //  require(unhandledTimeUUIDNonEqual.isEmpty,
+  //    s"""
+  //      | You are attempting to do a non-equality comparison on a TimeUUID column in Spark.
+  //      | Spark can only compare TimeUUIDs Lexically which means that the comparison will be
+  //      | different than the comparison done in C* which is done based on the Time Portion of
+  //      | TimeUUID. This will in almost all cases lead to incorrect results. If possible restrict
+  //      | doing a TimeUUID comparison only to columns which can be pushed down to Cassandra.
+  //      | https://datastax-oss.atlassian.net/browse/SPARKC-405.
+  //      |
+  //      | $unhandledTimeUUIDNonEqual
+  //    """.stripMargin)
 }
